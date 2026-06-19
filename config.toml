@@ -1,0 +1,8 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+disconnectedSessionTTL = 7200
+
+[browser]
+gatherUsageStats = false
