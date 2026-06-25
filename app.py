@@ -2,7 +2,7 @@
 """
 Pfeffer & Sohn — SimLearn app
 English for Business Communication (B2/C1)
-Single-file Streamlit app, per SIMLEARN_APP_BRIEF_v3.
+Per SIMLEARN_LAUSITZ spec (v4): forwarding mechanic, name entry, contact directory.
 """
 
 import os
@@ -44,13 +44,14 @@ def blank_group():
     return {
         "roles": {r: None for r in ROLE_NAMES},
         "left": {r: False for r in ROLE_NAMES},
+        "students": {r: {"name": ""} for r in ROLE_NAMES},
         "notes": {r: [] for r in ROLE_NAMES},
         "emails": {r: {} for r in ROLE_NAMES},
+        "forwards": {r: [] for r in ROLE_NAMES},
         "decision_draft": {r: {} for r in ROLE_NAMES},
         "final_decisions": {},
         "final_submitted": False,
         "newsflash_triggered": False,
-        "newsflash_seen": {r: False for r in ROLE_NAMES},
         "revised_decisions": {},
         "revised_submitted": False,
         "mcq_answers": {r: {} for r in ROLE_NAMES},
@@ -89,23 +90,15 @@ def save_groups(class_name, groups):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(groups, f, ensure_ascii=False, indent=2)
 
+def display_name(role, gstate):
+    """Return the student's real name if entered, otherwise the role label."""
+    name = gstate["students"].get(role, {}).get("name", "").strip()
+    return name if name else role
+
 def sync_decision_note(notes_list, prefix, content):
     notes_list[:] = [n for n in notes_list if not n.startswith(prefix)]
     if content:
         notes_list.append(prefix + content)
-
-# ---------------------------------------------------------------------------
-# CHARACTER LOOKUP
-# ---------------------------------------------------------------------------
-
-def all_characters():
-    out = {}
-    for role, info in ROLES.items():
-        for em in info["emails"]:
-            out[em["id"]] = (role, em)
-    return out
-
-CHAR_LOOKUP = all_characters()
 
 # ---------------------------------------------------------------------------
 # AI REPLY
@@ -150,14 +143,12 @@ if not st.session_state.api_key:
 
 os.makedirs(state_dir(CLASS_NAME), exist_ok=True)
 
-if "authed" not in st.session_state:
-    st.session_state.authed = False
-if "is_teacher" not in st.session_state:
-    st.session_state.is_teacher = False
-if "group" not in st.session_state:
-    st.session_state.group = None
-if "role" not in st.session_state:
-    st.session_state.role = None
+for key, default in [
+    ("authed", False), ("is_teacher", False),
+    ("group", None), ("role", None), ("name_entry_role", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 CLASS_PASSWORD = os.environ.get("CLASS_PASSWORD", "").strip()
 
@@ -174,7 +165,7 @@ if not st.session_state.authed:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# SIDEBAR — TEACHER LOGIN BUTTON
+# SIDEBAR — TEACHER LOGIN
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
@@ -201,21 +192,28 @@ if st.session_state.is_teacher:
         st.rerun()
 
     groups = load_groups(CLASS_NAME)
-
     tabs = st.tabs(["Overview", "Answer Key", "Trade Network", "Listening Script", "Manage Groups"])
 
     with tabs[0]:
         st.subheader("Active groups")
+        any_active = False
         for g in GROUP_PIECES:
             gstate = groups[g]
             occupied = [r for r in ROLE_NAMES if gstate["roles"][r]]
             if occupied:
-                st.write(f"**{g}**: " + ", ".join(f"{r} ({ROLES[r]['dept']})" for r in occupied))
+                any_active = True
+                parts = []
+                for r in occupied:
+                    name = display_name(r, gstate)
+                    parts.append(f"{name} ({ROLES[r]['dept']})")
+                st.write(f"**{g}**: " + ", ".join(parts))
+        if not any_active:
+            st.write("No active groups yet.")
 
     with tabs[1]:
         st.subheader("Naïve trap")
         st.warning(NAIVE_TRAP)
-        st.subheader("Hidden info summary (Tier 1, one line per character)")
+        st.subheader("Hidden info summary")
         for line in HIDDEN_INFO_SUMMARY:
             st.write(f"- {line}")
         st.subheader("MCQ Answer Key")
@@ -224,26 +222,31 @@ if st.session_state.is_teacher:
 
     with tabs[2]:
         st.subheader("Reciprocal Trade Network")
-        st.caption("Who each character wants contacted, and what they give back once verified.")
         for line in TRADE_NETWORK:
             st.write(f"- {line}")
 
     with tabs[3]:
         st.subheader("Listening Script")
-        st.caption(f"Podcast: {PODCAST_NAME}. Paste into ElevenLabs (or your TTS tool) ahead of class and play from your own device during the Listening tab.")
+        st.caption(f"{PODCAST_NAME} — paste into ElevenLabs and play from your device during the Listening tab.")
         st.text_area("Transcript", value=PODCAST, height=400)
 
     with tabs[4]:
         st.subheader("Remove individual students")
+        any_to_remove = False
         for g in GROUP_PIECES:
             gstate = groups[g]
             for r in ROLE_NAMES:
                 if gstate["roles"][r]:
-                    label = f"Remove {g} — {r} ({ROLES[r]['dept']})"
+                    any_to_remove = True
+                    name = display_name(r, gstate)
+                    label = f"Remove {g} — {name} ({ROLES[r]['dept']})"
                     if st.button(label, key=f"rm_{g}_{r}"):
                         gstate["roles"][r] = None
+                        # preserve name so rejoining student doesn't re-enter
                         save_groups(CLASS_NAME, groups)
                         st.rerun()
+        if not any_to_remove:
+            st.write("No students to remove.")
         st.divider()
         st.subheader("Reset")
         reset_g = st.selectbox("Reset a single group", ["—"] + GROUP_PIECES)
@@ -275,15 +278,46 @@ if st.session_state.group is None:
         gstate = groups[g]
         taken_count = sum(1 for r in ROLE_NAMES if gstate["roles"][r])
         full = taken_count >= 3
-        label = f"{g} ({taken_count}/3)" + (" — full" if full else "")
         with cols[i % 4]:
-            if st.button(label, key=f"grp_{g}", disabled=full):
-                st.session_state.group = g
-                st.rerun()
+            if not full:
+                if st.button(f"{g} ({taken_count}/3)", key=f"grp_{g}"):
+                    st.session_state.group = g
+                    st.rerun()
+            else:
+                st.button(f"{g} (3/3)", key=f"grp_{g}_full", disabled=True)
+                if st.button("Rejoin ↩", key=f"grp_{g}_rejoin"):
+                    st.session_state.group = g
+                    st.rerun()
     st.stop()
 
 GROUP_NAME = st.session_state.group
 gstate = groups[GROUP_NAME]
+
+# ---------------------------------------------------------------------------
+# NAME ENTRY (intermediate step before claiming a role)
+# ---------------------------------------------------------------------------
+
+if st.session_state.role is None and st.session_state.name_entry_role is not None:
+    pending_role = st.session_state.name_entry_role
+    st.title(f"🧵 {SCENARIO_TITLE}")
+    st.caption(f"Group: {GROUP_NAME} · {pending_role} — {ROLES[pending_role]['dept']}")
+    if st.button("⬅ Back to role selection"):
+        st.session_state.name_entry_role = None
+        st.rerun()
+    st.write("What's your name?")
+    name_input = st.text_input("Your name", key="name_entry_input", label_visibility="collapsed", placeholder="Enter your name...")
+    if st.button("Join", key="name_entry_join"):
+        if name_input.strip():
+            gstate["roles"][pending_role] = "active"
+            gstate["left"][pending_role] = False
+            gstate["students"][pending_role] = {"name": name_input.strip()}
+            save_groups(CLASS_NAME, groups)
+            st.session_state.role = pending_role
+            st.session_state.name_entry_role = None
+            st.rerun()
+        else:
+            st.warning("Please enter your name to continue.")
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # ROLE SELECTION
@@ -299,17 +333,17 @@ if st.session_state.role is None:
     st.write("Choose your role:")
     for r in ROLE_NAMES:
         taken = gstate["roles"][r] is not None
+        occupant = display_name(r, gstate) if taken else None
         col1, col2 = st.columns([3, 1])
         with col1:
-            label = f"{r} — {ROLES[r]['dept']}" + (" (Taken)" if taken else "")
-            if st.button(label, key=f"role_{r}", disabled=taken):
-                gstate["roles"][r] = "active"
-                gstate["left"][r] = False
-                save_groups(CLASS_NAME, groups)
-                st.session_state.role = r
-                st.rerun()
+            if taken:
+                st.button(f"{r} — {ROLES[r]['dept']} — taken by {occupant}", key=f"role_{r}", disabled=True)
+            else:
+                if st.button(f"{r} — {ROLES[r]['dept']}", key=f"role_{r}"):
+                    st.session_state.name_entry_role = r
+                    st.rerun()
         with col2:
-            if taken and st.button("Rejoin", key=f"rejoin_{r}"):
+            if st.button("Rejoin", key=f"rejoin_{r}"):
                 gstate["roles"][r] = "active"
                 gstate["left"][r] = False
                 save_groups(CLASS_NAME, groups)
@@ -320,12 +354,13 @@ if st.session_state.role is None:
 ROLE = st.session_state.role
 DEPT = ROLES[ROLE]["dept"]
 MY_EMAILS = ROLES[ROLE]["emails"]
+MY_DISPLAY_NAME = display_name(ROLE, gstate)
 
 # ---------------------------------------------------------------------------
 # SIDEBAR — NOTES
 # ---------------------------------------------------------------------------
 
-st.sidebar.markdown(f"### {ROLE} — {DEPT}")
+st.sidebar.markdown(f"### {MY_DISPLAY_NAME} — {DEPT}")
 if st.sidebar.button("🚪 I need to leave"):
     gstate["left"][ROLE] = True
     save_groups(CLASS_NAME, groups)
@@ -335,8 +370,8 @@ if st.sidebar.button("🚪 I need to leave"):
 st.sidebar.markdown("### 📝 Notes")
 with st.sidebar.form(key="note_form", clear_on_submit=True):
     note_input = st.text_input("Quick note", key="note_input",
-                                 label_visibility="collapsed",
-                                 placeholder="Type a note, press Enter...")
+                                label_visibility="collapsed",
+                                placeholder="Type a note, press Enter...")
     note_submitted = st.form_submit_button("Add")
 if note_submitted and note_input.strip():
     gstate["notes"][ROLE].append(note_input.strip())
@@ -346,15 +381,14 @@ if note_submitted and note_input.strip():
 if st.sidebar.button("📥 Load notes from team members"):
     groups = load_groups(CLASS_NAME)
     gstate = groups[GROUP_NAME]
-    added = 0
     for other_role in ROLE_NAMES:
         if other_role == ROLE:
             continue
+        other_name = display_name(other_role, gstate)
         for n in gstate["notes"][other_role]:
-            tagged = f"[{other_role} — {ROLES[other_role]['dept']}] {n}"
+            tagged = f"[{other_name} — {ROLES[other_role]['dept']}] {n}"
             if tagged not in gstate["notes"][ROLE]:
                 gstate["notes"][ROLE].append(tagged)
-                added += 1
     save_groups(CLASS_NAME, groups)
     st.rerun()
 
@@ -367,14 +401,14 @@ for idx, n in enumerate(gstate["notes"][ROLE]):
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# MAIN TABS
+# MAIN TABS — order per spec: Context → Listening → Emails → Pressure Points → Writing
 # ---------------------------------------------------------------------------
 
 st.title(f"🧵 {SCENARIO_TITLE}")
-st.caption(f"{ROLE} — {DEPT} · Group {GROUP_NAME}")
+st.caption(f"{MY_DISPLAY_NAME} — {DEPT} · Group {GROUP_NAME}")
 
-tab_context, tab_decisions, tab_listening, tab_emails, tab_meeting, tab_writing = st.tabs(
-    ["Context", DECISIONS_TAB_HEADER, "Listening", "Emails", "Meeting", "Writing"]
+tab_context, tab_listening, tab_emails, tab_meeting, tab_writing = st.tabs(
+    ["Context", "Listening", "Emails", DECISIONS_TAB_HEADER, "Writing"]
 )
 
 # --- CONTEXT TAB ---
@@ -385,20 +419,6 @@ with tab_context:
     st.warning(CONSTRAINT_TEXT)
     st.caption("💡 Use the Notes panel in the sidebar to save anything important as you go.")
 
-# --- DECISIONS TAB ---
-with tab_decisions:
-    st.write("These are the three pressure points the board must resolve. You'll make your real choice on the Meeting tab — for now, mark your provisional thinking.")
-    for d in DECISIONS:
-        st.markdown(f"#### {d['title']}")
-        st.write(f"**A.** {d['optA']}")
-        st.write(f"**B.** {d['optB']}")
-        key = f"prov_{d['id']}"
-        opts = ["Unsure", "A", "B"]
-        current = st.session_state.get(key, "Unsure")
-        idx = opts.index(current) if current in opts else 0
-        choice = st.radio("Your provisional thinking:", opts, index=idx, key=key, horizontal=True)
-        st.divider()
-
 # --- LISTENING TAB ---
 with tab_listening:
     st.write(f"🎧 Your teacher will play the **{PODCAST_NAME}** episode aloud. Listen carefully — these questions require the podcast, not just the briefing.")
@@ -406,8 +426,7 @@ with tab_listening:
         answers = {}
         for i, q in enumerate(MCQS):
             st.markdown(f"**{i+1}. {q['question']}**")
-            opt_keys = list(q["options"].keys())
-            labels = [f"{k}. {q['options'][k]}" for k in opt_keys]
+            labels = [f"{k}. {q['options'][k]}" for k in q["options"]]
             sel = st.radio("Answer:", labels, index=None, key=f"mcq_{i}", label_visibility="collapsed")
             if sel:
                 answers[i] = sel[0]
@@ -433,25 +452,92 @@ with tab_listening:
             if ok:
                 score += 1
             icon = "✅" if ok else "❌"
-            st.write(f"{icon} **{i+1}. {q['question']}** — correct answer: **{correct}. {q['options'][correct]}**" + (f" (you answered {given})" if given and not ok else ""))
+            wrong_note = f" (you answered {given})" if given and not ok else ""
+            st.write(f"{icon} **{i+1}. {q['question']}** — correct: **{correct}. {q['options'][correct]}**{wrong_note}")
         st.info(f"Score: {score}/{len(MCQS)}")
 
 # --- EMAILS TAB ---
 with tab_emails:
-    st.caption("💡 Several contacts will only share their real opinion once you've reported something back to them — read each 💬 carefully, and don't be afraid to email someone just to pass on what you learned elsewhere.")
+
+    # Refresh button
+    if st.button("🔄 Refresh", key="emails_refresh"):
+        groups = load_groups(CLASS_NAME)
+        gstate = groups[GROUP_NAME]
+        st.rerun()
+    st.caption("Click Refresh to check for forwarded messages from teammates.")
+
+    # Forwarded items
+    my_forwards = gstate["forwards"].get(ROLE, [])
+    if my_forwards:
+        st.markdown("### 📨 Forwarded to you")
+        for fwd in my_forwards:
+            sender_name = display_name(fwd["from_role"], gstate)
+            with st.container():
+                st.markdown(
+                    f"""<div style="border-left: 4px solid #4A90D9; padding: 8px 12px; margin-bottom: 8px; background: rgba(74,144,217,0.07); border-radius: 4px;">
+                    <strong>From {sender_name}</strong> via <em>{fwd['char_name']}, {fwd['char_title']}</em><br>
+                    {fwd['text']}
+                    {('<br><em>💬 ' + fwd['comment'] + '</em>') if fwd.get('comment','').strip() else ''}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+        st.divider()
+
+    # Contact directory
+    with st.expander("📋 Who has which contacts?"):
+        for r in ROLE_NAMES:
+            name = display_name(r, gstate)
+            chars = ", ".join(em["from"].split(",")[0] for em in ROLES[r]["emails"])
+            st.write(f"**{name}** ({ROLES[r]['dept']}): {chars}")
+        st.caption("If you need information from someone in another student's inbox, ask them to email that contact and forward you the reply.")
+
+    st.caption("💡 Several contacts will only share their real opinion once you've reported something back to them — read each email carefully, and don't be afraid to email someone just to pass on what you learned elsewhere.")
+
+    # Own inbox
     for em in MY_EMAILS:
         cid = em["id"]
         with st.expander(f"✉️ {em['subject']} — from {em['from']}", expanded=False):
             st.write(em["body"])
             st.divider()
             thread = gstate["emails"][ROLE].get(cid, [])
-            for msg in thread:
+            for msg_idx, msg in enumerate(thread):
                 if msg["role"] == "user":
                     st.markdown(f"**You:** {msg['content']}")
                 else:
                     st.markdown(f"**{em['from'].split(',')[0]}:** {msg['content']}")
+                    # Forward button after every AI reply
+                    with st.expander("📤 Forward this reply", expanded=False):
+                        other_roles = [r for r in ROLE_NAMES if r != ROLE]
+                        other_names = [display_name(r, gstate) for r in other_roles]
+                        fwd_to_label = st.selectbox(
+                            "Forward to:",
+                            options=other_names,
+                            key=f"fwd_to_{cid}_{msg_idx}",
+                        )
+                        fwd_comment = st.text_input(
+                            "Why does this matter? (optional)",
+                            key=f"fwd_comment_{cid}_{msg_idx}",
+                            placeholder="e.g. This changes the timeline calculation for us...",
+                        )
+                        if st.button("Send forward", key=f"fwd_send_{cid}_{msg_idx}"):
+                            to_role = other_roles[other_names.index(fwd_to_label)]
+                            fwd_item = {
+                                "from_role": ROLE,
+                                "char_id": cid,
+                                "char_name": em["from"].split(",")[0].strip(),
+                                "char_title": em["from"].split(",")[1].strip() if "," in em["from"] else "",
+                                "text": msg["content"],
+                                "comment": fwd_comment.strip(),
+                            }
+                            gstate["forwards"][to_role].append(fwd_item)
+                            save_groups(CLASS_NAME, groups)
+                            st.success(f"Forwarded to {fwd_to_label}.")
+
+            # Reply form
             with st.form(key=f"reply_form_{cid}", clear_on_submit=True):
-                reply = st.text_input("Your reply", key=f"reply_input_{cid}", label_visibility="collapsed", placeholder="Type your reply...")
+                reply = st.text_input("Your reply", key=f"reply_input_{cid}",
+                                       label_visibility="collapsed",
+                                       placeholder="Type your reply...")
                 sent = st.form_submit_button("Send")
             if sent and reply.strip():
                 client = get_client()
@@ -469,23 +555,53 @@ with tab_emails:
                 save_groups(CLASS_NAME, groups)
                 st.rerun()
 
+    # Redistributed inboxes for students who left
     for other_role in ROLE_NAMES:
         if other_role != ROLE and gstate["left"].get(other_role):
+            other_name = display_name(other_role, gstate)
             st.divider()
-            st.markdown(f"### 🔁 Redistributed — {other_role}'s inbox ({ROLES[other_role]['dept']})")
+            st.markdown(f"### 🔁 Redistributed — {other_name}'s inbox ({ROLES[other_role]['dept']})")
             for em in ROLES[other_role]["emails"]:
                 cid = em["id"]
                 with st.expander(f"✉️ {em['subject']} — from {em['from']}", expanded=False):
                     st.write(em["body"])
                     st.divider()
                     thread = gstate["emails"][other_role].get(cid, [])
-                    for msg in thread:
+                    for msg_idx, msg in enumerate(thread):
                         if msg["role"] == "user":
                             st.markdown(f"**You:** {msg['content']}")
                         else:
                             st.markdown(f"**{em['from'].split(',')[0]}:** {msg['content']}")
+                            with st.expander("📤 Forward this reply", expanded=False):
+                                other_roles = [r for r in ROLE_NAMES if r != ROLE]
+                                other_names = [display_name(r, gstate) for r in other_roles]
+                                fwd_to_label = st.selectbox(
+                                    "Forward to:",
+                                    options=other_names,
+                                    key=f"rfwd_to_{cid}_{msg_idx}",
+                                )
+                                fwd_comment = st.text_input(
+                                    "Why does this matter? (optional)",
+                                    key=f"rfwd_comment_{cid}_{msg_idx}",
+                                    placeholder="e.g. This changes the timeline calculation for us...",
+                                )
+                                if st.button("Send forward", key=f"rfwd_send_{cid}_{msg_idx}"):
+                                    to_role = other_roles[other_names.index(fwd_to_label)]
+                                    fwd_item = {
+                                        "from_role": ROLE,
+                                        "char_id": cid,
+                                        "char_name": em["from"].split(",")[0].strip(),
+                                        "char_title": em["from"].split(",")[1].strip() if "," in em["from"] else "",
+                                        "text": msg["content"],
+                                        "comment": fwd_comment.strip(),
+                                    }
+                                    gstate["forwards"][to_role].append(fwd_item)
+                                    save_groups(CLASS_NAME, groups)
+                                    st.success(f"Forwarded to {fwd_to_label}.")
                     with st.form(key=f"reply_form_redist_{cid}", clear_on_submit=True):
-                        reply = st.text_input("Your reply", key=f"reply_input_redist_{cid}", label_visibility="collapsed", placeholder="Type your reply...")
+                        reply = st.text_input("Your reply", key=f"reply_input_redist_{cid}",
+                                               label_visibility="collapsed",
+                                               placeholder="Type your reply...")
                         sent = st.form_submit_button("Send")
                     if sent and reply.strip():
                         client = get_client()
@@ -503,7 +619,7 @@ with tab_emails:
                         save_groups(CLASS_NAME, groups)
                         st.rerun()
 
-# --- MEETING TAB ---
+# --- PRESSURE POINTS TAB ---
 with tab_meeting:
     if not gstate["final_submitted"]:
         all_complete = True
@@ -511,7 +627,6 @@ with tab_meeting:
             st.markdown(f"**{d['title']}**")
             st.write(f"**A.** {d['optA']}")
             st.write(f"**B.** {d['optB']}")
-
             draft = gstate["decision_draft"][ROLE].get(d["id"], {"choice": None, "however": ""})
             opts = ["A", "B"]
             idx = opts.index(draft["choice"]) if draft.get("choice") in opts else None
@@ -550,7 +665,6 @@ with tab_meeting:
         if gstate["newsflash_triggered"]:
             st.divider()
             st.error(NEWSFLASH)
-
             if not gstate["revised_submitted"]:
                 st.markdown("#### Does your group want to revise any decision?")
                 revised = {}
@@ -575,9 +689,9 @@ with tab_meeting:
 # --- WRITING TAB ---
 with tab_writing:
     st.write(f"**Task:** Write a {WRITING_TASK_LABEL} (~{WRITING_WORD_TARGET} words) addressed to **{WRITING_ADDRESSEE}**, recommending a course of action for the board.")
-    st.caption("💡 Before you start, click 'Load notes from team members' in the sidebar — this is the moment you need the whole group's findings, not just your own.")
+    st.caption("💡 Before you start: use 'Load notes from team members' in the sidebar, and check the 📨 Forwarded to you section in the Emails tab — both may have information you haven't seen yet.")
 
-    with st.expander("📝 Show me the notes I took"):
+    with st.expander("📝 Show my notes"):
         if gstate["notes"][ROLE]:
             for n in gstate["notes"][ROLE]:
                 st.write(f"- {n}")
@@ -594,12 +708,12 @@ with tab_writing:
         if st.button("Get formative feedback (no grade)"):
             if draft.strip():
                 client = get_client()
-                system = f"""You are an experienced Business English writing tutor giving FORMATIVE feedback on a {WRITING_TASK_LABEL} written by a {LEVEL} student. This is a draft, not a final submission — there is no grade at this stage.
+                system = f"""You are an experienced Business English writing tutor giving FORMATIVE feedback on a {WRITING_TASK_LABEL} written by a {LEVEL} student. This is a draft — no grade at this stage.
 
-Scenario context the student was working from:
+Scenario context:
 {PEER_FEEDBACK_CONTEXT}
 
-Find genuine strengths first. Limit critical feedback to ONE focused development point — the single most useful thing for this student to improve next. Be encouraging, specific, and developmental, not evaluative. Reference the student's actual content where possible. Keep it to 4-6 sentences total."""
+Find genuine strengths first. Limit critical feedback to ONE focused development point. Be encouraging, specific, and developmental. Reference the student's actual content where possible. Keep it to 4-6 sentences total."""
                 try:
                     resp = client.messages.create(model=MODEL, max_tokens=400, system=system,
                                                     messages=[{"role": "user", "content": draft}])
@@ -615,12 +729,12 @@ Find genuine strengths first. Limit critical feedback to ONE focused development
         if st.button("Submit final version for grading"):
             if draft.strip():
                 client = get_client()
-                system = f"""You are an experienced Business English assessor giving SUMMATIVE feedback on a {WRITING_TASK_LABEL} written by a {LEVEL} student, for their course transcript.
+                system = f"""You are an experienced Business English assessor giving SUMMATIVE feedback on a {WRITING_TASK_LABEL} written by a {LEVEL} student.
 
 Scenario facts to assess against:
 {FINAL_FEEDBACK_CONTEXT}
 
-Propose a grade band (Excellent / Good / Satisfactory / Needs Improvement) based on task achievement, organisation, language accuracy, and use of scenario evidence. The teacher will always make the final grading decision — you are proposing, not deciding. Give one specific, focused development point. Keep total response to 6-8 sentences. End with a clear line: "Proposed grade band: [band]"."""
+Propose a grade band (Excellent / Good / Satisfactory / Needs Improvement) based on task achievement, organisation, language accuracy, and use of scenario evidence. The teacher makes the final grading decision — you are proposing only. Give one specific development point. Keep total response to 6-8 sentences. End with: "Proposed grade band: [band]"."""
                 try:
                     resp = client.messages.create(model=MODEL, max_tokens=500, system=system,
                                                     messages=[{"role": "user", "content": draft}])
