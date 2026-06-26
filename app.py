@@ -141,8 +141,6 @@ if not st.session_state.api_key:
         st.error("API key not configured. Check Railway environment variables.")
         st.stop()
 
-os.makedirs(state_dir(CLASS_NAME), exist_ok=True)
-
 for key, default in [
     ("authed", False), ("is_teacher", False),
     ("class_selection", None), ("group", None),
