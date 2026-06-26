@@ -21,7 +21,7 @@ from content import (
 )
 
 MODEL = "claude-haiku-4-5-20251001"
-CLASS_NAME = "default"
+CLASSES = {"Andrew": "andrews_class", "Olivia": "olivias_class"}
 ROLE_NAMES = ["Student A", "Student B", "Student C"]
 GROUP_PIECES = ["Boot", "Iron", "Top Hat", "Battleship", "Thimble", "Wheelbarrow", "Car", "Dog"]
 
@@ -145,7 +145,8 @@ os.makedirs(state_dir(CLASS_NAME), exist_ok=True)
 
 for key, default in [
     ("authed", False), ("is_teacher", False),
-    ("group", None), ("role", None), ("name_entry_role", None),
+    ("class_selection", None), ("group", None),
+    ("role", None), ("name_entry_role", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -163,6 +164,22 @@ if not st.session_state.authed:
         else:
             st.error("Incorrect password.")
     st.stop()
+
+# ---------------------------------------------------------------------------
+# CLASS SELECTION
+# ---------------------------------------------------------------------------
+
+if not st.session_state.is_teacher and st.session_state.class_selection is None:
+    st.title(f"🧵 {SCENARIO_TITLE}")
+    st.caption(f"{ORG_NAME} · English for Business Communication ({LEVEL})")
+    st.write("Which class are you in?")
+    for label in CLASSES:
+        if st.button(label, key=f"class_{label}"):
+            st.session_state.class_selection = CLASSES[label]
+            st.rerun()
+    st.stop()
+
+CLASS_NAME = st.session_state.class_selection if st.session_state.class_selection else "andrews_class"
 
 # ---------------------------------------------------------------------------
 # SIDEBAR — TEACHER LOGIN
@@ -191,7 +208,9 @@ if st.session_state.is_teacher:
         st.session_state.is_teacher = False
         st.rerun()
 
-    groups = load_groups(CLASS_NAME)
+    teacher_class_label = st.radio("Viewing class:", list(CLASSES.keys()), horizontal=True)
+    teacher_class_name = CLASSES[teacher_class_label]
+    groups = load_groups(teacher_class_name)
     tabs = st.tabs(["Overview", "Answer Key", "Trade Network", "Listening Script", "Manage Groups"])
 
     with tabs[0]:
@@ -243,7 +262,7 @@ if st.session_state.is_teacher:
                     if st.button(label, key=f"rm_{g}_{r}"):
                         gstate["roles"][r] = None
                         # preserve name so rejoining student doesn't re-enter
-                        save_groups(CLASS_NAME, groups)
+                        save_groups(teacher_class_name, groups)
                         st.rerun()
         if not any_to_remove:
             st.write("No students to remove.")
@@ -252,12 +271,12 @@ if st.session_state.is_teacher:
         reset_g = st.selectbox("Reset a single group", ["—"] + GROUP_PIECES)
         if reset_g != "—" and st.button("Reset this group"):
             groups[reset_g] = blank_group()
-            save_groups(CLASS_NAME, groups)
+            save_groups(teacher_class_name, groups)
             st.success(f"{reset_g} reset.")
             st.rerun()
         if st.button("⚠️ Reset ALL groups (full session reset)"):
             groups = {g: blank_group() for g in GROUP_PIECES}
-            save_groups(CLASS_NAME, groups)
+            save_groups(teacher_class_name, groups)
             st.success("All groups reset.")
             st.rerun()
 
